@@ -91,6 +91,13 @@ GENRE_REFERENCE = {
         "emotivní příběh",
         "rodinné drama",
     ],
+    "horror": [
+        "strašlivý film",
+        "horrorní příběh",
+        "něco děsivého",
+        "chci se bát",
+        "chci horror",
+    ]
 }
 
 SORT_REFERENCE = {
@@ -101,6 +108,7 @@ SORT_REFERENCE = {
     ],
 }
 
+CAST_REFERENCE = {}
 
 # ---------------------------------------------------------------------------
 # 3. Klasifikátor -- centroidy se počítají JEDNOU při inicializaci (ne za běhu)
@@ -121,6 +129,8 @@ class ConstraintClassifier:
         self.genre_centroids = self._build_centroids(GENRE_REFERENCE)
         self.sort_centroids = self._build_centroids(SORT_REFERENCE)
 
+        self.cast_centroids = self._build_centroids(CAST_REFERENCE)  # Přidáno pro detekci herců
+        
     def _build_centroids(self, reference: dict[str, list[str]]) -> dict[str, np.ndarray]:
         centroids = {}
         for label, phrases in reference.items():
@@ -161,6 +171,7 @@ class ConstraintClassifier:
             "origin_score": origin_score,
             "genre_score": genre_score,
             "sort_score": sort_score,
+            
         }
 
 

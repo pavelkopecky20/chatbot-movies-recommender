@@ -16,7 +16,8 @@ from embedding_classifier import ConstraintClassifier
 
 st.set_page_config(page_title="Movie Chatbot", page_icon="🎬")
 
-FREE_QUOTA = 3  # zpráv zdarma na návštěvníka -- viz OpenAI spend cap jako druhá vrstva ochrany
+FREE_QUOTA = 3      # zpráv zdarma na návštěvníka -- viz OpenAI spend cap jako druhá vrstva ochrany
+EXTENDED_QUOTA = 50  # limit pro návštěvníky s platným přístupovým kódem (viz _try_unlock)
 
 # Kvóta je záměrně MIMO st.session_state -- ten se resetuje při obyčejném refreshi stránky
 # (nová WebSocket session = nová session_state), takže by to byl triviální obchvat. Místo
@@ -62,6 +63,36 @@ def _increment_messages_used() -> None:
         quota_store[key] = quota_store.get(key, 0) + 1
 
 
+# Stejný princip jako u kvóty -- @st.cache_resource, ne obyčejný modulový set,
+# jinak by se odemčení ztratilo při každém rerunu (viz komentář výše u kvóty).
+@st.cache_resource
+def _get_unlocked_store() -> set[str]:
+    return set()
+
+
+def _valid_access_codes() -> set[str]:
+    """Kódy žijí ve Streamlit Secrets (stejné místo jako OPENAI_API_KEY), ne v repu."""
+    try:
+        return set(st.secrets.get("access_codes", {}).values())
+    except Exception:
+        return set()  # lokální běh bez secrets.toml -- žádné kódy nejsou platné, ne pád appky
+
+
+def _is_unlocked() -> bool:
+    return _client_key() in _get_unlocked_store()
+
+
+def _try_unlock(code: str) -> bool:
+    if code and code in _valid_access_codes():
+        _get_unlocked_store().add(_client_key())
+        return True
+    return False
+
+
+def _effective_quota() -> int:
+    return EXTENDED_QUOTA if _is_unlocked() else FREE_QUOTA
+
+
 @st.cache_resource(show_spinner="Připravuji katalog a embeddingy...")
 def get_resources():
     """Postaví drahé sdílené zdroje JEDNOU za život procesu (napříč všemi návštěvníky)."""
@@ -89,10 +120,11 @@ def process_message(user_message: str) -> None:
         {"role": "user", "content": user_message, "picks": [], "chips": []}
     )
 
-    if _messages_used() >= FREE_QUOTA:                          # kvóta vyčerpaná -- ŽÁDNÉ volání OpenAI
+    quota = _effective_quota()
+    if _messages_used() >= quota:                                # kvóta vyčerpaná -- ŽÁDNÉ volání OpenAI
         response = brain.AgentResponse(
             reply=(
-                f"Vyčerpal jsi bezplatný limit {FREE_QUOTA} zpráv pro tuhle ukázku. "
+                f"Vyčerpal jsi limit {quota} zpráv pro tuhle ukázku. "
                 "Zkus to prosím později -- limit je natrvalo na tohle připojení, refresh stránky ho neobnoví. "
                 "Případně kontaktuj autora této aplikace."
             ),
@@ -108,6 +140,31 @@ def process_message(user_message: str) -> None:
     )
 
 
+def _handle_chip_command(chip_text: str) -> bool:
+    """
+    CHIP_RESET_ALL / CHIP_RESET_GENRE jsou PŘÍMÉ PŘÍKAZY -- řeší se rovnou tady, ne
+    posláním přes process_message()/handle_turn(). Ten dřívější přístup (poslat text
+    chipu jako běžnou zprávu a spolehnout se, že ho keyword-matching v update_constraints
+    rozpozná) nefungoval spolehlivě -- "Zrušit omezení" (infinitiv) nikdy nesedělo na
+    kontrolu "zruš omezení" (rozkazovací způsob) v brain.py. Přímý příkaz navíc nevolá
+    OpenAI a nepočítá se do kvóty -- je to čistě UI akce, ne konverzační tah.
+    Vrátí True, pokud chip_text rozpoznala jako příkaz (a obsloužila ho), jinak False --
+    volající pak pošle text normální cestou přes process_message().
+    """
+    if chip_text == brain.CHIP_RESET_ALL:
+        st.session_state.conv_state.sticky_constraints.clear()
+        reply = "Zrušil jsem všechna aktivní omezení."
+    elif chip_text == brain.CHIP_RESET_GENRE:
+        st.session_state.conv_state.sticky_constraints.pop("genre", None)
+        reply = "Zrušil jsem omezení na žánr, ostatní filtry zůstávají beze změny."
+    else:
+        return False
+
+    st.session_state.display_log.append({"role": "user", "content": chip_text, "picks": [], "chips": []})
+    st.session_state.display_log.append({"role": "assistant", "content": reply, "picks": [], "chips": []})
+    return True
+
+
 with st.sidebar:
     st.subheader("Aktivní filtry")
     constraints = st.session_state.conv_state.sticky_constraints
@@ -117,9 +174,33 @@ with st.sidebar:
     else:
         st.caption("Žádné aktivní omezení.")
 
+    # Trvalá tlačítka, ne jen chips vázané na konkrétní odpověď -- ta se objeví jen
+    # u FALLBACK_RESPONSE / "nic jsem nenašel" větve v call_llm(), takže by při normální
+    # (úspěšné) odpovědi zmizela. Volají STEJNOU _handle_chip_command() funkci jako chips.
+    col_genre, col_all = st.columns(2)
+    with col_genre:
+        if st.button(brain.CHIP_RESET_GENRE, use_container_width=True):
+            _handle_chip_command(brain.CHIP_RESET_GENRE)
+            st.rerun()
+    with col_all:
+        if st.button(brain.CHIP_RESET_ALL, use_container_width=True):
+            _handle_chip_command(brain.CHIP_RESET_ALL)
+            st.rerun()
+
     st.divider()
-    remaining = max(0, FREE_QUOTA - _messages_used())
-    st.caption(f"Zbývá {remaining}/{FREE_QUOTA} zpráv zdarma pro tohle připojení.")
+    if _is_unlocked():
+        st.caption("✓ Rozšířený přístup aktivní.")
+    else:
+        entered_code = st.text_input("Přístupový kód (volitelné)", type="password", key="access_code_input")
+        if entered_code:
+            if _try_unlock(entered_code):
+                st.success(f"Kód přijat -- limit navýšen na {EXTENDED_QUOTA} zpráv.")
+            else:
+                st.error("Neplatný kód.")
+
+    quota = _effective_quota()
+    remaining = max(0, quota - _messages_used())
+    st.caption(f"Zbývá {remaining}/{quota} zpráv pro tohle připojení.")
 
     if st.button("Resetovat konverzaci"):
         st.session_state.conv_state.sticky_constraints.clear()  # kvóta žije mimo session_state, tímhle se nedotkne
@@ -136,10 +217,11 @@ st.caption(
     "sticky constraints extrahované klasifikátorem nad embeddingy, LLM routing mezi gpt-4o/gpt-4o-mini."
 )
 
-if st.session_state.pending_chip:                              # klik na chip = jako by uživatel tohle napsal
+if st.session_state.pending_chip:                              # klik na chip
     chip_text = st.session_state.pending_chip
     st.session_state.pending_chip = None
-    process_message(chip_text)
+    if not _handle_chip_command(chip_text):                    # nejdřív zkusit jako přímý příkaz (reset/žánr)
+        process_message(chip_text)                              # jinak poslat jako běžnou zprávu, jako by ji uživatel napsal
     st.rerun()
 
 for i, turn in enumerate(st.session_state.display_log):

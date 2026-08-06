@@ -10,6 +10,7 @@ from pathlib import Path                            # cesta k catalog_tmdb.json 
 from typing import Optional                        # typová anotace "buď tohle, nebo None"
 
 import numpy as np                                 # práce s vektory/maticemi (embeddingy, similarity)
+import tiktoken                                     # přesné počítání tokenů pro dávkování embedding requestů
 from pydantic import BaseModel                      # definice schématu strukturovaného výstupu
 
 
@@ -80,6 +81,57 @@ def _load_catalog() -> list[CatalogItem]:
 
 CATALOG: list[CatalogItem] = _load_catalog()          # simulace databázové tabulky katalogu
 
+_ALL_CAST_NAMES: set[str] = {name for item in CATALOG for name in item.cast}  # všechna jména herců z katalogu -- pro rychlou detekci v dotazu (krok 1), bez hardcodování jmen
+
+
+def _match_known_cast_name(name: str) -> Optional[str]:
+    """Case-insensitive lookup proti _ALL_CAST_NAMES -- vrátí kanonický tvar jména herce z katalogu, nebo None."""
+    name_lower = name.lower()
+    for known in _ALL_CAST_NAMES:
+        if known.lower() == name_lower:
+            return known
+    return None
+
+
+def _detect_cast_substring(user_message: str) -> Optional[str]:
+    """
+    Krok 1 -- rychlá shoda proti jménům, co už známe z katalogu (bez hardcodování
+    jmen v kódu, bez API volání). Volá se z handle_turn PŘED klasifikátorem, aby
+    šlo případně přeskočit klasifikaci žánru pro dotazy, co evidentně mluví o herci.
+    """
+    text = user_message.lower()
+    for name in _ALL_CAST_NAMES:
+        if name.lower() in text:                # jméno herce se doslovně objevuje v dotazu
+            return name                          # první nalezená shoda vyhrává (pořadí v _ALL_CAST_NAMES není definované)
+    return None
+
+
+_TOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")  # tokenizer, co skutečně používá text-embedding-3-small
+
+
+def _chunk_texts_for_embedding(texts: list[str], max_tokens_per_batch: int = 290_000) -> list[list[str]]:
+    """
+    OpenAI embeddings API limituje ~300k tokenů SOUHRNNĚ na jeden request -- u malého
+    katalogu (desítky/stovky titulů) se to nikdy nepřiblíží, ale u větších (1000+)
+    se to snadno překročí. Počítá se PŘESNÝM tokenizerem (tiktoken), ne odhadem
+    přes počet znaků -- ten selhával u textů s diakritikou (čeština se tokenizuje
+    méně efektivně než angličtina, takže odhad znak/token skutečný počet podceňoval).
+    """
+    batches: list[list[str]] = []
+    current_batch: list[str] = []
+    current_tokens = 0
+    for text in texts:
+        text_tokens = len(_TOKEN_ENCODING.encode(text))
+        if current_batch and current_tokens + text_tokens > max_tokens_per_batch:  # dávka by přetekla -- uzavřít ji a začít novou
+            batches.append(current_batch)
+            current_batch = []
+            current_tokens = 0
+        current_batch.append(text)
+        current_tokens += text_tokens
+    if current_batch:                                                 # poslední rozpracovaná dávka
+        batches.append(current_batch)
+    return batches
+
 
 class EmbeddingProvider:
     """
@@ -93,11 +145,14 @@ class EmbeddingProvider:
 
     def embed(self, texts: list[str]) -> np.ndarray:
         if self.client is not None:                  # větev "reálný model" -- máme platný klient
-            response = self.client.embeddings.create(  # zavolá skutečné embedding API
-                model="text-embedding-3-small",       # konkrétní multilingual model, viz DOC 3 tabulka
-                input=texts,                          # seznam textů k zaembeddování najednou (batch)
-            )
-            return np.array([d.embedding for d in response.data])  # vytáhne vektory z odpovědi API do numpy pole
+            vectors = []                              # sem se skládají vektory ze všech dávek, v původním pořadí
+            for batch in _chunk_texts_for_embedding(texts):  # rozdělí velký vstup na dávky pod limitem API
+                response = self.client.embeddings.create(     # zavolá skutečné embedding API
+                    model="text-embedding-3-small",           # konkrétní multilingual model, viz DOC 3 tabulka
+                    input=batch,                               # jedna dávka textů k zaembeddování
+                )
+                vectors.extend(d.embedding for d in response.data)  # vytáhne vektory z odpovědi API
+            return np.array(vectors)
 
         # --- FALLBACK (no API key): naivní hash-based vektor ---
         print("[WARNING] Žádný OPENAI_API_KEY -- používám fallback embedding, "
@@ -131,14 +186,16 @@ class VectorStore:
     def __init__(self, catalog: list[CatalogItem], embedder: EmbeddingProvider):
         self.catalog = catalog                        # referenci na celý katalog (potřebujeme i indexy)
         self.embedder = embedder                       # uložený embedding provider (reálný nebo fallback)
-        corpus = [f"{c.title} {c.genre} {c.description}" for c in catalog]  # spojí relevantní textová pole do jednoho stringu na titul
+        corpus = [f"{c.title} {c.genre} {c.description} {' '.join(c.cast)}" for c in catalog]  # spojí relevantní textová pole (+ cast, krok 3) do jednoho stringu na titul
         self.embeddings = embedder.embed(corpus)        # předpočítá embeddingy pro celý katalog najednou (offline indexace)
 
     def search(self, query: str, constraints: dict, top_k: int = 3) -> list[CatalogItem]:
+        print(f"[SEARCH] constraints={constraints}")   # constraints tady je stejný dict jako state.sticky_constraints, jen pod jiným jménem
         candidates_idx = [                             # seznam indexů titulů, které projdou TVRDÝM filtrem
             i for i, c in enumerate(self.catalog)       # projde celý katalog s indexem i
             if _origin_matches(constraints.get("origin"), c.origin_country)   # podmínka 1: pokud je nastaven origin constraint, musí sedět
             and (constraints.get("genre") is None or c.genre == constraints["genre"])       # podmínka 2: totéž pro žánr
+            and (constraints.get("cast") is None or constraints["cast"] in c.cast)          # podmínka 3: totéž pro herce (krok 1/2 -- tvrdý filtr)
         ]
         if not candidates_idx:                          # pokud filtr nevyhodí ANI JEDEN kandidát
             return []                                    # vrátíme prázdný seznam -- žádné náhradní řešení, žádná halucinace
@@ -161,20 +218,38 @@ class ConversationState:
     MAX_HISTORY_TURNS = 4                                       # kolik posledních zpráv se posílá do promptu (ne neomezeně)
     classifier: Optional[ConstraintClassifier] = None            # volitelný embedding klasifikátor (viz embedding_classifier.py); None = jen keyword fallback
 
-    def update_constraints(self, user_message: str) -> None:
+    def update_constraints(self, user_message: str, skip_genre_classifier: bool = False) -> None:
         """
         DOC 2.3 -- 'lightweight extraction step'. Zůstává rule-based i v této
         verzi: je to levná operace, kterou nemá smysl posílat na drahý model.
+
+        skip_genre_classifier=True, když handle_turn už PŘED zavoláním týhle metody
+        zjistil (kroky 1/2 -- viz _detect_cast_substring/extract_cast_mention), že
+        dotaz evidentně mluví o herci. Klasifikátor genre zná jen pár pevných
+        kategorií (spy/comedy/drama/horror) a na cokoliv jiného stejně odpoví
+        tou "nejméně vzdálenou" z nich -- i když s žánrem nemá dotaz nic společného.
         """
         text = user_message.lower()                          # normalizace na malá písmena kvůli porovnávání
+        # detekce origin / původu - ruled based
         if "lokální" in text or "české" in text or "český" in text:  # detekce žádosti o lokální obsah
             self.sticky_constraints["origin"] = "local"        # nastaví/aktualizuje constraint origin
         if "zahraniční" in text:                              # detekce opačné žádosti
             self.sticky_constraints["origin"] = "international"  # přepíše constraint na international
+
+        # detekce žánrů / genre - ruled based
         if "špionáž" in text or "spy" in text:                 # detekce žánru spy
             self.sticky_constraints["genre"] = "spy"           # nastaví constraint genre
         if "komedi" in text:              # detekce žánru komedie (pokrývá "komedie", "komedii" atd.)
             self.sticky_constraints["genre"] = "comedy"        # nastaví constraint genre na comedy
+        if "horror" in text or "strašidelný" in text:  # detekce žánru horror
+            self.sticky_constraints["genre"] = "horror"         # nastaví constraint genre na horror
+        if "válečný" in text or "válka" in text:  # detekce žánru war
+            self.sticky_constraints["genre"] = "war"            # nastaví constraint genre na war
+        if "dokumentární" in text or "dokument" in text:  # detekce žánru documentary
+            self.sticky_constraints["genre"] = "documentary"    # nastaví constraint genre na documentary
+        if "science fiction" in text or "sci-fi" in text or "scifi" in text:  # detekce žánru science fiction
+            self.sticky_constraints["genre"] = "science fiction"  # nastaví constraint genre na science fiction
+
         if "zruš omezení" in text or "cokoliv" in text:        # explicitní žádost o reset
             self.sticky_constraints.clear()                    # vyprázdní všechny constrainty -- uživatel musí mít cestu ven
         if self.classifier:                                            # pokud je k dispozici embedding klasifikátor
@@ -183,7 +258,10 @@ class ConversationState:
             if "origin" in result:                                     # nastaví jen to, na co si je klasifikátor dost jistý (nad threshold)
                 self.sticky_constraints["origin"] = result["origin"]
             if "genre" in result:
-                self.sticky_constraints["genre"] = result["genre"]
+                if skip_genre_classifier:                              # dotaz evidentně mluví o herci -- žánr od klasifikátoru ignorujeme
+                    print(f"[CLASSIFIER] genre='{result['genre']}' ignorováno -- dotaz je o herci, ne o žánru.")
+                else:
+                    self.sticky_constraints["genre"] = result["genre"]
 
     def add_turn(self, role: str, content: str) -> None:
         self.history.append({"role": role, "content": content})  # přidá zprávu (user/assistant) do historie
@@ -196,10 +274,50 @@ class AgentResponse(BaseModel):                             # DOC 2.4 -- schema 
     chips: list[str]                                          # rychlé fráze, které může uživatel "ťuknout"
 
 
+# Tyhle dva texty NEJSOU jen popisky -- app.py je rozpoznává jako PŘÍMÉ PŘÍKAZY (bez volání
+# handle_turn/LLM, viz _handle_chip_command v app.py), ne jako volný text posílaný přes
+# obvyklý keyword-matching pipeline. Proto konstanty tady, ne duplicitní literály na dvou místech.
+CHIP_RESET_ALL = "Zrušit omezení"      # vyprázdní CELÉ sticky_constraints
+CHIP_RESET_GENRE = "Zkusit jiný žánr"  # vyprázdní jen klíč "genre"
+
+
+class CastExtraction(BaseModel):                            # schema pro krok 2 -- LLM extrakce jména herce/herečky z dotazu
+    cast_name: Optional[str] = None                          # jméno, pokud LLM nějaké v dotazu rozpozná, jinak None
+
+
+def extract_cast_mention(client: Optional["OpenAI"], user_message: str) -> Optional[str]:
+    """
+    DOC krok 2 -- fallback pro dotazy, kde krok 1 (substring shoda) selhal, typicky kvůli
+    skloňování ("Toma Hankse") nebo překlepu. LLM jméno normalizuje na základní tvar,
+    takže i tak jde ověřit proti _ALL_CAST_NAMES. Volá se JEN když krok 1 nic nenašel
+    (viz handle_turn) -- šetří to volání, které by jinak bylo zbytečné pro drtivou
+    většinu dotazů bez zmínky herce.
+    """
+    if client is None:                                        # fallback režim -- žádný klíč, žádné volání
+        return None
+    try:
+        completion = client.beta.chat.completions.parse(
+            model="gpt-4o-mini",                              # levný model, jednoduchý extrakční úkol
+            messages=[
+                {"role": "system", "content": (
+                    "Extrahuj jméno herce nebo herečky zmíněné v dotazu uživatele o filmu/seriálu, "
+                    "pokud tam nějaké je (i ve skloněném tvaru -- vrať ho v základním tvaru). "
+                    "Pokud žádné jméno herce/herečky v dotazu není, vrať cast_name jako null."
+                )},
+                {"role": "user", "content": user_message},
+            ],
+            response_format=CastExtraction,
+        )
+        return completion.choices[0].message.parsed.cast_name
+    except Exception as exc:                                   # síť/API chyba nesmí shodit celý tah -- jen se přeskočí extrakce
+        print(f"[CAST-EXTRACT] Volání selhalo ({exc}), pokračuju bez extrakce.")
+        return None
+
+
 FALLBACK_RESPONSE = AgentResponse(                            # bezpečná odpověď při selhání validace/LLM
     reply="Omlouvám se, teď ti nedokážu poradit -- zkus to prosím přeformulovat.",
     picks=[],                                                  # záměrně prázdné -- radši nic než nesmysl
-    chips=["Zkusit jiný dotaz", "Zrušit omezení"],
+    chips=["Zkusit jiný dotaz", CHIP_RESET_ALL],
 )
 
 
@@ -217,7 +335,7 @@ def call_llm(client: Optional["OpenAI"], model_name: str, user_message: str,
         return AgentResponse(                                 # vrátíme rovnou odpověď BEZ volání LLM
             reply="V katalogu jsem nenašel nic, co odpovídá tvým podmínkám.",
             picks=[],                                          # žádné picks -- LLM by tady stejně nemělo co nabídnout
-            chips=["Zkusit jiný žánr", "Zrušit omezení"],
+            chips=[CHIP_RESET_GENRE, CHIP_RESET_ALL],
         )
 
     if client is None:                                        # fallback větev -- žádný API klíč k dispozici
@@ -261,6 +379,10 @@ def validate_response(response: AgentResponse, catalog: list[CatalogItem]) -> Ag
     filtered = [pid for pid in response.picks if pid in valid_ids]  # ponechá jen picks, co jsou v této množině
     if len(filtered) != len(response.picks):                        # pokud se něco odfiltrovalo
         print("[GUARDRAIL] Odfiltrován neplatný/nedostupný catalog ID.")  # zaloguje to (v produkci: metrika/alert)
+    if response.picks and not filtered:                              # LLM chtělo něco doporučit, ale VŠECHNY picks byly neplatné --
+        response.reply += (                                          # jinak by reply slíbil tituly a picks/karty by zůstaly prázdné
+            " (Omlouvám se, navržené tituly se nepodařilo ověřit v katalogu -- zkus to prosím přeformulovat.)"
+        )
     response.picks = filtered                                       # přepíše picks na už jen ověřená ID
     return response                                                  # vrátí opravenou odpověď
 
@@ -269,8 +391,31 @@ def handle_turn(user_message: str, state: ConversationState,
                  store: VectorStore, client: Optional["OpenAI"]) -> AgentResponse:
 
     constraints_before = dict(state.sticky_constraints)              # kopie stavu PŘED update (pro detekci změny)
-    state.update_constraints(user_message)                           # DOC 2.3 -- aktualizuje sticky constraints
-    constraints_changed = constraints_before != state.sticky_constraints  # True, pokud se něco reálně změnilo
+
+    # Detekce herce PROBÍHÁ PŘED update_constraints/klasifikátorem (kroky 1 a 2), aby
+    # šlo klasifikaci žánru pro tenhle tah rovnou přeskočit, pokud dotaz evidentně
+    # mluví o herci -- klasifikátor genre by jinak i tak vrátil "nejbližší" ze svých
+    # pár pevných kategorií, i když s žánrem dotaz nesouvisí (viz DOC diskuze).
+    cast_match = _detect_cast_substring(user_message)                 # krok 1 -- bez API volání
+    if not cast_match and client is not None:                         # krok 2 -- LLM fallback, JEN když krok 1 nic nenašel
+        extracted_name = extract_cast_mention(client, user_message)
+        if extracted_name:
+            matched_name = _match_known_cast_name(extracted_name)    # ověří/normalizuje proti skutečným jménům v katalogu
+            if matched_name:
+                cast_match = matched_name
+                print(f"[CAST-EXTRACT] LLM rozpoznal '{extracted_name}' -> shoda v katalogu: '{matched_name}'")
+            else:
+                print(f"[CAST-EXTRACT] LLM rozpoznal '{extracted_name}', ale v katalogu nikdo takový není -- ignoruji.")
+
+    if cast_match:
+        state.sticky_constraints["cast"] = cast_match
+
+    # DOC 2.3 -- keyword pravidla + klasifikátor; genre od klasifikátoru se přeskočí,
+    # pokud jsme právě (kroky 1/2 výše) zjistili, že dotaz mluví o herci.
+    state.update_constraints(user_message, skip_genre_classifier=bool(cast_match))
+
+    constraints_changed = constraints_before != state.sticky_constraints  # True, pokud se něco reálně změnilo (vč. kroku 1/2)
+    print(f"[STATE] sticky_constraints={state.sticky_constraints}")  # log stavu po tomto tahu
 
     candidates = store.search(user_message, state.sticky_constraints)  # DOC 2.2 -- hybrid retrieval s aplikací constraintů
 
