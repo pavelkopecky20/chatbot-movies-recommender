@@ -93,7 +93,8 @@ def process_message(user_message: str) -> None:
         response = brain.AgentResponse(
             reply=(
                 f"Vyčerpal jsi bezplatný limit {FREE_QUOTA} zpráv pro tuhle ukázku. "
-                "Zkus to prosím později -- limit je natrvalo na tohle připojení, refresh stránky ho neobnoví."
+                "Zkus to prosím později -- limit je natrvalo na tohle připojení, refresh stránky ho neobnoví. "
+                "Případně kontaktuj autora této aplikace."
             ),
             picks=[],
             chips=[],

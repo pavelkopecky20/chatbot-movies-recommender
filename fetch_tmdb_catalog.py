@@ -8,10 +8,10 @@ Vyžaduje TMDB_API_KEY v .env -- zdarma na https://www.themoviedb.org/settings/a
 
 Výstup: catalog_tmdb.json ve stejné složce; brain.py ho automaticky načítá.
 
-Pro každý film se volá /discover/movie (objevení ID, pár volání na stránky)
+Pro každý film se volá /discover/movie (objevení ID, pár desítek volání na stránky)
 a pak /movie/{id} s append_to_response=keywords,credits,watch/providers
-(jedno volání NA FILM navíc) -- proto tenhle běh trvá cca 1-2 minuty
-místo pár sekund, jak tomu bylo u čistě discover verze.
+(jedno volání NA FILM navíc) -- při výchozích počtech stránek (cíl ~1000-2000
+titulů ve výsledném katalogu) trvá celý běh řádově 20-25 minut.
 """
 
 import json
@@ -143,7 +143,9 @@ def _build_catalog_item(
     )
 
 
-def fetch_catalog(pages_local: int = 3, pages_international: int = 5, pages_spy: int = 2) -> list[CatalogItem]:
+def fetch_catalog(pages_local: int = 25, pages_international: int = 45, pages_spy: int = 17) -> list[CatalogItem]:
+    # 25+45+17 stránek * 20 = ~1740 surových záznamů před dedupem/filtrem -- cílí na finální katalog ~1000-2000 titulů.
+    # Detail fáze (jedno volání NA FILM) je při tomhle objemu dlouhá -- řádově 20 minut, viz komentář v docstringu nahoře.
     if not TMDB_API_KEY:
         raise RuntimeError(
             "Chybí TMDB_API_KEY v .env. Zdarma ho získáš na "
