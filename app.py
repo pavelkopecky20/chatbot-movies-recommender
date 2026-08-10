@@ -55,25 +55,38 @@ _cookie_controller = CookieController()
 
 def _get_or_create_visitor_id() -> str:
     """
-    Cookie nastavená přes CookieController.set() se (na rozdíl od dřívějšího iframe
-    hacku) fakt uloží a fakt se přečte i po refreshi -- ale první vykreslení stránky
-    v nové session pořád může proběhnout dřív, než se komponenta na klientovi stihne
-    inicializovat a vrátit hodnotu zpátky. Proto se nově vygenerované ID mezitím drží
-    v st.session_state, ať je stabilní aspoň v rámci aktuální session, dokud se cookie
-    nepotvrdí. Když má prohlížeč cookies vypnuté, degraduje se to zpět na chování
-    per-session (kvóta se resetuje při refreshi) -- nespadne to, jen ztratí výhodu.
+    RACE CONDITION, na kterou je potřeba dávat pozor: CookieController je async
+    komponenta -- na úplně první vykreslení nové session (= po refreshi stránky)
+    její getAll() vždy vrátí jen prázdný `default={}`, i když prohlížeč reálně
+    nějakou cookie z minula pošle. Skutečná hodnota z JS dorazí a projeví se
+    až o jeden rerun později. Kdybychom na ten prázdný výsledek reagovali hned
+    (vygenerovat nové ID a přepsat cookie), přepsali bychom platnou starou cookie
+    dřív, než by vůbec měla šanci se načíst -- to je přesně to, proč se ID měnilo
+    při KAŽDÉM refreshi. Proto se čeká jeden rerun navíc (_cookie_settle_done),
+    než se appka rozhodne, že jde o nového návštěvníka.
+
+    Nově vygenerované ID se mezitím drží v st.session_state, ať je stabilní
+    v rámci aktuální session. Když má prohlížeč cookies vypnuté, degraduje se to
+    zpět na chování per-session (kvóta se resetuje při refreshi) -- nespadne to,
+    jen ztratí výhodu.
     """
     cookie_id = _cookie_controller.get(_VISITOR_COOKIE_NAME)
     if cookie_id:
         return cookie_id
 
-    if "temp_visitor_id" not in st.session_state:
-        st.session_state.temp_visitor_id = str(uuid.uuid4())
-        _cookie_controller.set(
-            _VISITOR_COOKIE_NAME,
-            st.session_state.temp_visitor_id,
-            max_age=31536000,  # 1 rok, v sekundách
-        )
+    if "temp_visitor_id" in st.session_state:            # v týhle session už jsme se jednou rozhodli, drž se toho
+        return st.session_state.temp_visitor_id
+
+    if not st.session_state.get("_cookie_settle_done"):    # dej komponentě šanci vrátit REÁLNOU hodnotu, ne jen default
+        st.session_state._cookie_settle_done = True
+        st.rerun()
+
+    st.session_state.temp_visitor_id = str(uuid.uuid4())
+    _cookie_controller.set(
+        _VISITOR_COOKIE_NAME,
+        st.session_state.temp_visitor_id,
+        max_age=31536000,  # 1 rok, v sekundách
+    )
     return st.session_state.temp_visitor_id
 
 
