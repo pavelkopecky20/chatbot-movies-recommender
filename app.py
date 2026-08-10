@@ -11,6 +11,7 @@ import uuid
 
 import streamlit as st
 from openai import OpenAI
+from streamlit_cookies_controller import CookieController
 
 import brain
 from embedding_classifier import ConstraintClassifier
@@ -41,31 +42,37 @@ def _get_quota_store() -> dict[str, int]:
 
 _VISITOR_COOKIE_NAME = "chatbot_visitor_id"
 
+# IP/X-Forwarded-For se v praxi ukázaly jako nespolehlivé (na Streamlit Community Cloud
+# dávaly nestabilní hodnoty napříč refreshi stránky téhož návštěvníka). Ruční JS injekce
+# přes st.iframe/document.cookie TAKY nefungovala spolehlivě -- moderní prohlížeče čím
+# dál víc partitionují cookies/storage nastavené UVNITŘ iframe od cookies hlavní stránky,
+# takže se cookie nastavená z iframu k serveru na dalším requestu vůbec nedostala (ověřeno
+# v DevTools -- při každém refreshi vznikalo nové ID). CookieController je skutečná
+# obousměrná Streamlit komponenta (vlastní frontend build, ne vystřelený <script> bez
+# zpětné vazby), takže cookie nastavuje/čte spolehlivě na správné doméně.
+_cookie_controller = CookieController()
+
 
 def _get_or_create_visitor_id() -> str:
     """
-    IP/X-Forwarded-For se v praxi ukázaly jako nespolehlivé (na Streamlit Community
-    Cloud dávaly nestabilní/nekonzistentní hodnoty napříč refreshi stránky téhož
-    návštěvníka -- kvóta se pak chovala, jako by šlo pokaždé o nového). Tohle je
-    nezávislé na tom, jak si to platforma řeší interně přes proxy: appka si sama
-    vytvoří náhodné ID a uloží ho do cookie v prohlížeči.
-
-    Cookie nastavená přes JS (st.iframe) se projeví AŽ při příštím načtení stránky,
-    ne v tomhle běhu skriptu -- proto se nově vygenerované ID mezitím drží
-    v st.session_state, ať je stabilní aspoň v rámci aktuální session, dokud cookie
-    nedorazí. Když má prohlížeč cookies vypnuté, degraduje se to zpět na chování
+    Cookie nastavená přes CookieController.set() se (na rozdíl od dřívějšího iframe
+    hacku) fakt uloží a fakt se přečte i po refreshi -- ale první vykreslení stránky
+    v nové session pořád může proběhnout dřív, než se komponenta na klientovi stihne
+    inicializovat a vrátit hodnotu zpátky. Proto se nově vygenerované ID mezitím drží
+    v st.session_state, ať je stabilní aspoň v rámci aktuální session, dokud se cookie
+    nepotvrdí. Když má prohlížeč cookies vypnuté, degraduje se to zpět na chování
     per-session (kvóta se resetuje při refreshi) -- nespadne to, jen ztratí výhodu.
     """
-    cookie_id = st.context.cookies.get(_VISITOR_COOKIE_NAME)
+    cookie_id = _cookie_controller.get(_VISITOR_COOKIE_NAME)
     if cookie_id:
         return cookie_id
 
     if "temp_visitor_id" not in st.session_state:
         st.session_state.temp_visitor_id = str(uuid.uuid4())
-        st.iframe(                                            # st.iframe s HTML stringem = JS se vykoná, stejně jako dřívější components.html
-            f"<script>document.cookie = '{_VISITOR_COOKIE_NAME}={st.session_state.temp_visitor_id}; "
-            "max-age=31536000; path=/; SameSite=Lax';</script>",
-            height=1,                                          # minimální neinvazivní výška -- 1px sliver v UI, cena za skript, co se musí vykonat
+        _cookie_controller.set(
+            _VISITOR_COOKIE_NAME,
+            st.session_state.temp_visitor_id,
+            max_age=31536000,  # 1 rok, v sekundách
         )
     return st.session_state.temp_visitor_id
 
@@ -147,7 +154,7 @@ def process_message(user_message: str) -> None:
         response = brain.AgentResponse(
             reply=(
                 f"Vyčerpal jsi limit {quota} zpráv pro tuhle ukázku. "
-                "Zkus to prosím později -- limit je natrvalo na tohle připojení, refresh stránky ho neobnoví. "
+                "Zkus to prosím později -- limit je natrvalo na tohle připojení. "
                 "Případně kontaktuj autora této aplikace."
             ),
             picks=[],
