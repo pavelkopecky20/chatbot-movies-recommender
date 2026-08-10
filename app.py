@@ -69,8 +69,19 @@ def _get_or_create_visitor_id() -> str:
     v rámci aktuální session. Když má prohlížeč cookies vypnuté, degraduje se to
     zpět na chování per-session (kvóta se resetuje při refreshi) -- nespadne to,
     jen ztratí výhodu.
+
+    Volání CookieController jsou obalená try/except -- v produkci se ukázalo,
+    že interní stav komponenty (self.__cookies) může za určitých okolností být
+    None místo slovníku (bug/edge-case v knihovně samotné, ne v našem kódu),
+    což shazovalo celou appku na TypeError. Radši degradovat na per-session
+    chování než appku úplně zabít kvůli závislosti, do jejíhož vnitřku nevidíme.
     """
-    cookie_id = _cookie_controller.get(_VISITOR_COOKIE_NAME)
+    try:
+        cookie_id = _cookie_controller.get(_VISITOR_COOKIE_NAME)
+    except Exception as exc:
+        print(f"[COOKIE] CookieController.get() selhalo ({exc}) -- pokračuju bez cookie.")
+        cookie_id = None
+
     if cookie_id:
         return cookie_id
 
@@ -82,11 +93,14 @@ def _get_or_create_visitor_id() -> str:
         st.rerun()
 
     st.session_state.temp_visitor_id = str(uuid.uuid4())
-    _cookie_controller.set(
-        _VISITOR_COOKIE_NAME,
-        st.session_state.temp_visitor_id,
-        max_age=31536000,  # 1 rok, v sekundách
-    )
+    try:
+        _cookie_controller.set(
+            _VISITOR_COOKIE_NAME,
+            st.session_state.temp_visitor_id,
+            max_age=31536000,  # 1 rok, v sekundách
+        )
+    except Exception as exc:
+        print(f"[COOKIE] CookieController.set() selhalo ({exc}) -- ID bude platit jen pro tuhle session.")
     return st.session_state.temp_visitor_id
 
 
