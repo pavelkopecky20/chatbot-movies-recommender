@@ -11,7 +11,7 @@ pinned: false
 
 # Movie Chatbot
 
-Konverzační doporučovací chatbot nad katalogem filmů (170 titulů z TMDB). Portfolio ukázka RAG/agentního
+Konverzační doporučovací chatbot nad katalogem filmů (1331 titulů z TMDB). Portfolio ukázka RAG/agentního
 pipeline pro streamovací katalog.
 
 ## Co to umí

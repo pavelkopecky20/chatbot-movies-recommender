@@ -2,11 +2,12 @@
 Streamlit frontend nad brain.py -- veřejná portfolio ukázka na Hugging Face Spaces.
 Veškerá doménová logika (retrieval, sticky constraints, LLM routing) zůstává
 v brain.py beze změny; tenhle soubor jen řeší UI, per-session konverzační stav
-a kvótu zpráv (ta je záměrně sdílená napříč sessions, viz komentář u _quota_by_ip).
+a kvótu zpráv (ta je záměrně sdílená napříč sessions, viz komentář u _get_quota_store).
 """
 
 import os
 import threading
+import uuid
 
 import streamlit as st
 from openai import OpenAI
@@ -21,9 +22,10 @@ EXTENDED_QUOTA = 50  # limit pro návštěvníky s platným přístupovým kóde
 
 # Kvóta je záměrně MIMO st.session_state -- ten se resetuje při obyčejném refreshi stránky
 # (nová WebSocket session = nová session_state), takže by to byl triviální obchvat. Místo
-# toho je to sdílený stav na úrovni procesu, klíčovaný podle IP adresy -- přežije refresh,
-# ale ne restart/redeploy Space (přijatelný kompromis pro demo, backstop je OpenAI spend cap).
-# Sdílená IP (NAT, VPN, firemní síť) = sdílená kvóta -- taky přijatelný kompromis pro demo.
+# toho je to sdílený stav na úrovni procesu, klíčovaný podle _client_key() (viz níže --
+# cookie v prohlížeči, ne IP adresa/hlavičky, ty se na Streamlit Community Cloud ukázaly
+# jako nespolehlivé). Přežije refresh, ale ne restart/redeploy Space (přijatelný kompromis
+# pro demo, backstop je OpenAI spend cap).
 #
 # DŮLEŽITÉ: obyčejný modulový `dict = {}` by NEFUNGOVAL -- Streamlit přeexekuuje celý
 # top-level kód skriptu při KAŽDÉM rerunu (i implicitním po st.rerun()), takže by se
@@ -37,19 +39,39 @@ def _get_quota_store() -> dict[str, int]:
     return {}
 
 
+_VISITOR_COOKIE_NAME = "chatbot_visitor_id"
+
+
+def _get_or_create_visitor_id() -> str:
+    """
+    IP/X-Forwarded-For se v praxi ukázaly jako nespolehlivé (na Streamlit Community
+    Cloud dávaly nestabilní/nekonzistentní hodnoty napříč refreshi stránky téhož
+    návštěvníka -- kvóta se pak chovala, jako by šlo pokaždé o nového). Tohle je
+    nezávislé na tom, jak si to platforma řeší interně přes proxy: appka si sama
+    vytvoří náhodné ID a uloží ho do cookie v prohlížeči.
+
+    Cookie nastavená přes JS (st.iframe) se projeví AŽ při příštím načtení stránky,
+    ne v tomhle běhu skriptu -- proto se nově vygenerované ID mezitím drží
+    v st.session_state, ať je stabilní aspoň v rámci aktuální session, dokud cookie
+    nedorazí. Když má prohlížeč cookies vypnuté, degraduje se to zpět na chování
+    per-session (kvóta se resetuje při refreshi) -- nespadne to, jen ztratí výhodu.
+    """
+    cookie_id = st.context.cookies.get(_VISITOR_COOKIE_NAME)
+    if cookie_id:
+        return cookie_id
+
+    if "temp_visitor_id" not in st.session_state:
+        st.session_state.temp_visitor_id = str(uuid.uuid4())
+        st.iframe(                                            # st.iframe s HTML stringem = JS se vykoná, stejně jako dřívější components.html
+            f"<script>document.cookie = '{_VISITOR_COOKIE_NAME}={st.session_state.temp_visitor_id}; "
+            "max-age=31536000; path=/; SameSite=Lax';</script>",
+            height=1,                                          # minimální neinvazivní výška -- 1px sliver v UI, cena za skript, co se musí vykonat
+        )
+    return st.session_state.temp_visitor_id
+
+
 def _client_key() -> str:
-    """
-    Streamlit `ip_address` vrací None při přístupu přes localhost/loopback --
-    přesně tahle situace může nastat na HF Spaces, kde interní proxy k appce
-    přistupuje přes localhost, takže `ip_address` by pro všechny návštěvníky
-    vracelo None (kvóta by se zdegradovala na jeden sdílený pool pro všechny --
-    přísnější, ne rozbité, ale ne zamýšlené chování). X-Forwarded-For hlavičku
-    nastavují běžné reverse proxy (včetně HF), takže se zkouší přednostně.
-    """
-    forwarded_for = st.context.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()  # první IP v řetězci = skutečný klient, zbytek jsou proxy
-    return st.context.ip_address or "unknown"
+    return _get_or_create_visitor_id()
 
 
 def _messages_used() -> int:
@@ -213,7 +235,7 @@ with st.sidebar:
 
 st.title("🎬 Movie Chatbot")
 st.caption(
-    "Doporučovací chatbot nad katalogem filmů (TMDB, 170 titulů) -- embedding retrieval, "
+    f"Doporučovací chatbot nad katalogem filmů (TMDB, {len(brain.CATALOG)} titulů) -- embedding retrieval, "
     "sticky constraints extrahované klasifikátorem nad embeddingy, LLM routing mezi gpt-4o/gpt-4o-mini."
 )
 
