@@ -5,9 +5,11 @@ v brain.py beze změny; tenhle soubor jen řeší UI, per-session konverzační 
 a kvótu zpráv (ta je záměrně sdílená napříč sessions, viz komentář u _get_quota_store).
 """
 
+import base64
 import os
 import threading
 import uuid
+from pathlib import Path
 
 import streamlit as st
 from openai import OpenAI
@@ -16,6 +18,129 @@ import brain
 from embedding_classifier import ConstraintClassifier
 
 st.set_page_config(page_title="Movie Chatbot", page_icon="🎬")
+
+
+def _set_element_background(selector: str, image_path: Path, mime: str = "image/jpeg") -> None:
+    """Nastaví obrázek na pozadí libovolnému elementu podle CSS selektoru (sidebar, hlavní plocha, ...)."""
+    encoded = base64.b64encode(image_path.read_bytes()).decode()
+    st.markdown(
+        f"""
+        <style>
+        {selector} {{
+            background-image: url("data:{mime};base64,{encoded}") !important;
+            background-size: cover !important;
+            background-position: center !important;
+            background-repeat: no-repeat !important;
+            background-attachment: scroll !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+_PICTURES_DIR = Path(__file__).parent / "pictures"  # cesta relativní k app.py -- funguje bez ohledu na to, odkud se streamlit spouští
+_set_element_background('[data-testid="stSidebar"]', _PICTURES_DIR / "movies.jpg")
+_set_element_background('[data-testid="stAppScrollToBottomContainer"]', _PICTURES_DIR / "popcorn_girls.jpg", mime="image/jpeg")  # skutečný celoplošný panel bez paddingu (třída "stMain", ne testid) -- stMainBlockContainer je jen užší odsazený vnitřní box, proto zůstával bílý pás kolem; ověřeno naživo přes Playwright
+# stHeader (horní lišta s "Deploy") a stBottom (spodní pruh s chat_input) jsou SAMOSTATNÉ elementy,
+# ne potomci stAppScrollToBottomContainer výš -- proto obrázek odtamtud na ně nedosáhl, potřebují ho zvlášť.
+_set_element_background('[data-testid="stHeader"]', _PICTURES_DIR / "movies.jpg", mime="image/jpg")  # defaultně plná bílá + vysoký z-index, obrázek (neprůhledný) ji přebije, protože se kreslí nad barvou
+_set_element_background('[data-testid="stBottom"]', _PICTURES_DIR / "popcorn.jpg", mime="image/jpg")
+
+st.markdown(
+    """
+    <style>
+    /* Sidebar má obrázek na pozadí -- text v něm potřebuje vlastní čitelnou podložku, ne přímo na obrázku.
+       stSidebarUserContent = přesně ten obsah, co appka do sidebaru sama vkládá (ne navigace/logo apod.). */
+    [data-testid="stSidebarUserContent"] {
+        background-color: rgba(0, 0, 0, 0.88) !important;
+        border-radius: 10px;
+        padding: 1rem !important;
+    }
+    [data-testid="stSidebarUserContent"] * {
+        color: white !important;
+    }
+    /* Tlačítka zvlášť -- vestavěné bílé/světlé pozadí tlačítka + bílý text výš by dalo bílou na bílé,
+       nečitelné. Průhledné pozadí + bílý rámeček, žádná plná výplň. */
+    [data-testid="stSidebarUserContent"] button {
+        background-color: transparent !important;
+        border: 2px solid white !important;
+        color: white !important;
+    }
+    [data-testid="stSidebarUserContent"] button:hover {
+        background-color: rgba(255, 255, 255, 0.15) !important;
+        border-color: white !important;
+    }
+    [data-testid="stCaptionContainer"] {
+        font-size: 20px;
+        font-weight: bold;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <style>
+    /* Hlavní okno má obrázek (old.png) VIDITELNÝ na pozadí (nastaveno na stAppScrollToBottomContainer
+       výš, ne na tenhle kontejner -- ten je jen užší odsazený vnitřní box, viz komentář nahoře).
+       Sem patří jen čitelnost TEXTU: obecně bílý + stín (čitelný i přímo na obrázku) a jen
+       JEDNOTLIVÉ prvky (nadpis, chatové bubliny, karty filmů) mají svou vlastní tmavou podložku. */
+    [data-testid="stMainBlockContainer"] * {
+        color: white !important;
+        text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.9);
+    }
+    [data-testid="stMainBlockContainer"] button {
+        background-color: rgba(0, 0, 0, 0.55) !important;
+        border: 2px solid white !important;
+        color: white !important;
+        text-shadow: none;
+    }
+    [data-testid="stMainBlockContainer"] button:hover {
+        background-color: rgba(255, 255, 255, 0.15) !important;
+        border-color: white !important;
+    }
+    /* Nadpis + popisek nahoře -- vlastní tmavý panel (viz st.container(key="header_banner") v kódu). */
+    .st-key-header_banner {
+        background-color: rgba(0, 0, 0, 0.9);
+        padding: 1rem 1.25rem;
+        border-radius: 10px;
+        margin-bottom: 1rem;
+    }
+    /* Chatové bubliny -- vlastní výrazná tmavá podložka, tady se čte nejvíc textu. */
+    [data-testid="stChatMessage"] {
+        background-color: rgba(0, 0, 0, 0.6) !important;
+        border-radius: 10px;
+    }
+    /* Karty doporučených filmů -- st.container(border=True, key=f"card-...") v kódu, cíleno přes částečnou shodu třídy. */
+    [class*="st-key-card-"] {
+        background-color: rgba(0, 0, 0, 0.6) !important;
+        border-radius: 10px;
+    }
+    /* Chat input -- stChatInput/stBottom jsou samo o sobě průhledné (obrázek pod nimi je vidět),
+       ale vnitřní box vstupního pole má vlastní vestavěné světle šedé pozadí (rgb(240,242,246)),
+       bez vlastního data-testid -- cíleno strukturálně (první potomek stChatInput), ne přes
+       nestabilní generovanou CSS třídu. */
+    [data-testid="stChatInput"] > div:first-child {
+        background-color: rgba(0, 0, 0, 0.6) !important;
+    }
+    [data-testid="stChatInput"] textarea {
+        color: white !important;
+    }
+    [data-testid="stChatInput"] textarea::placeholder {
+        color: rgba(255, 255, 255, 0.6) !important;
+    }
+    /* Plocha KOLEM vstupního pole (spodní bar) -- Streamlit tam interně vykresluje vlastní
+       neprůhledný bílý panel (bez data-testid, jen generovaná třída "e15ve43o3"), co leží
+       NAD stBottom a zakrývá jeho obrázek. Bez zásahu do samotného vstupního pole. */
+    .e15ve43o3 {
+        background-color: transparent !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 FREE_QUOTA = 3      # zpráv zdarma na návštěvníka -- viz OpenAI spend cap jako druhá vrstva ochrany
 EXTENDED_QUOTA = 50  # limit pro návštěvníky s platným přístupovým kódem (viz _try_unlock)
@@ -229,11 +354,12 @@ with st.sidebar:
     if client is None:
         st.warning("Běží ve fallback režimu (chybí OPENAI_API_KEY) -- odpovědi nejsou generované LLM.")
 
-st.title("🎬 Movie Chatbot")
-st.caption(
-    f"Doporučovací chatbot nad katalogem filmů (TMDB, {len(brain.CATALOG)} titulů) -- embedding retrieval, "
-    "sticky constraints extrahované klasifikátorem nad embeddingy, LLM routing mezi gpt-4o/gpt-4o-mini."
-)
+with st.container(key="header_banner"):  # poloprůhledný tmavý panel za nadpisem -- barva/stín textu samotná
+    st.title("🎬 Movie Chatbot")           # proti nepředvídatelnému obrázku na pozadí nestačila, tohle je spolehlivé bez ohledu na to, co je pod tím
+    st.caption(
+        f"Doporučovací chatbot nad katalogem filmů (TMDB, {len(brain.CATALOG)} titulů) -- embedding retrieval, "
+        "sticky constraints extrahované klasifikátorem nad embeddingy, LLM routing mezi gpt-4o/gpt-4o-mini."
+    )
 
 if st.session_state.pending_chip:                              # klik na chip
     chip_text = st.session_state.pending_chip
@@ -250,7 +376,7 @@ for i, turn in enumerate(st.session_state.display_log):
             item = catalog_by_id.get(pick_id)
             if item is None:
                 continue
-            with st.container(border=True):
+            with st.container(border=True, key=f"card-{i}-{pick_id}"):  # key -> cílitelná CSS třída st-key-card-... pro čitelnou podložku
                 st.markdown(f"**{item.title}** ({item.year}) -- _{item.genre}_")
                 description = item.description
                 st.caption(description[:200] + ("..." if len(description) > 200 else ""))
