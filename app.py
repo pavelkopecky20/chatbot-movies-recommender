@@ -11,7 +11,6 @@ import uuid
 
 import streamlit as st
 from openai import OpenAI
-from streamlit_cookies_controller import CookieController
 
 import brain
 from embedding_classifier import ConstraintClassifier
@@ -24,9 +23,9 @@ EXTENDED_QUOTA = 50  # limit pro návštěvníky s platným přístupovým kóde
 # Kvóta je záměrně MIMO st.session_state -- ten se resetuje při obyčejném refreshi stránky
 # (nová WebSocket session = nová session_state), takže by to byl triviální obchvat. Místo
 # toho je to sdílený stav na úrovni procesu, klíčovaný podle _client_key() (viz níže --
-# cookie v prohlížeči, ne IP adresa/hlavičky, ty se na Streamlit Community Cloud ukázaly
-# jako nespolehlivé). Přežije refresh, ale ne restart/redeploy Space (přijatelný kompromis
-# pro demo, backstop je OpenAI spend cap).
+# ID v URL query parametru, ne cookie/IP/hlavičky -- ty se v praxi ukázaly jako
+# nespolehlivé, viz komentář u _get_or_create_visitor_id). Přežije refresh, ale ne
+# restart/redeploy Space (přijatelný kompromis pro demo, backstop je OpenAI spend cap).
 #
 # DŮLEŽITÉ: obyčejný modulový `dict = {}` by NEFUNGOVAL -- Streamlit přeexekuuje celý
 # top-level kód skriptu při KAŽDÉM rerunu (i implicitním po st.rerun()), takže by se
@@ -40,68 +39,31 @@ def _get_quota_store() -> dict[str, int]:
     return {}
 
 
-_VISITOR_COOKIE_NAME = "chatbot_visitor_id"
+_VISITOR_ID_PARAM = "vid"
 
-# IP/X-Forwarded-For se v praxi ukázaly jako nespolehlivé (na Streamlit Community Cloud
-# dávaly nestabilní hodnoty napříč refreshi stránky téhož návštěvníka). Ruční JS injekce
-# přes st.iframe/document.cookie TAKY nefungovala spolehlivě -- moderní prohlížeče čím
-# dál víc partitionují cookies/storage nastavené UVNITŘ iframe od cookies hlavní stránky,
-# takže se cookie nastavená z iframu k serveru na dalším requestu vůbec nedostala (ověřeno
-# v DevTools -- při každém refreshi vznikalo nové ID). CookieController je skutečná
-# obousměrná Streamlit komponenta (vlastní frontend build, ne vystřelený <script> bez
-# zpětné vazby), takže cookie nastavuje/čte spolehlivě na správné doméně.
-_cookie_controller = CookieController()
-
-
+# Historie neúspěšných pokusů (ať je jasné, proč tohle a ne něco "chytřejšího"):
+# 1) IP/X-Forwarded-For hlavičky -- na Streamlit Community Cloud nestabilní napříč
+#    refreshi téhož návštěvníka.
+# 2) Ruční JS injekce přes st.iframe/document.cookie -- moderní prohlížeče partitionují
+#    cookies nastavené UVNITŘ iframe od cookies hlavní stránky, takže se k serveru
+#    na dalším requestu vůbec nedostaly.
+# 3) streamlit-cookies-controller (skutečná async komponenta) -- v produkci padalo na
+#    TypeError kvůli internímu stavu knihovny (self.__cookies == None), a i po obalení
+#    try/except se ID při refreshi pořád měnilo -- systematicky nespolehlivé na tomhle
+#    nasazení, ne jen občasná chyba.
+#
+# st.query_params je čistě nativní Streamlit mechanismus -- žádná async komponenta,
+# žádný round-trip, žádná závislost na tom, jak si prohlížeč/platforma řeší cookies.
+# ID se zapíše přímo do URL; refresh (F5) načte STEJNOU URL i s parametrem, takže ho
+# appka uvidí hned na začátku běhu skriptu, synchronně a spolehlivě. Cena: ID je vidět
+# v adresním řádku (jen náhodné UUID, nic citlivého).
 def _get_or_create_visitor_id() -> str:
-    """
-    RACE CONDITION, na kterou je potřeba dávat pozor: CookieController je async
-    komponenta -- na úplně první vykreslení nové session (= po refreshi stránky)
-    její getAll() vždy vrátí jen prázdný `default={}`, i když prohlížeč reálně
-    nějakou cookie z minula pošle. Skutečná hodnota z JS dorazí a projeví se
-    až o jeden rerun později. Kdybychom na ten prázdný výsledek reagovali hned
-    (vygenerovat nové ID a přepsat cookie), přepsali bychom platnou starou cookie
-    dřív, než by vůbec měla šanci se načíst -- to je přesně to, proč se ID měnilo
-    při KAŽDÉM refreshi. Proto se čeká jeden rerun navíc (_cookie_settle_done),
-    než se appka rozhodne, že jde o nového návštěvníka.
-
-    Nově vygenerované ID se mezitím drží v st.session_state, ať je stabilní
-    v rámci aktuální session. Když má prohlížeč cookies vypnuté, degraduje se to
-    zpět na chování per-session (kvóta se resetuje při refreshi) -- nespadne to,
-    jen ztratí výhodu.
-
-    Volání CookieController jsou obalená try/except -- v produkci se ukázalo,
-    že interní stav komponenty (self.__cookies) může za určitých okolností být
-    None místo slovníku (bug/edge-case v knihovně samotné, ne v našem kódu),
-    což shazovalo celou appku na TypeError. Radši degradovat na per-session
-    chování než appku úplně zabít kvůli závislosti, do jejíhož vnitřku nevidíme.
-    """
-    try:
-        cookie_id = _cookie_controller.get(_VISITOR_COOKIE_NAME)
-    except Exception as exc:
-        print(f"[COOKIE] CookieController.get() selhalo ({exc}) -- pokračuju bez cookie.")
-        cookie_id = None
-
-    if cookie_id:
-        return cookie_id
-
-    if "temp_visitor_id" in st.session_state:            # v týhle session už jsme se jednou rozhodli, drž se toho
-        return st.session_state.temp_visitor_id
-
-    if not st.session_state.get("_cookie_settle_done"):    # dej komponentě šanci vrátit REÁLNOU hodnotu, ne jen default
-        st.session_state._cookie_settle_done = True
-        st.rerun()
-
-    st.session_state.temp_visitor_id = str(uuid.uuid4())
-    try:
-        _cookie_controller.set(
-            _VISITOR_COOKIE_NAME,
-            st.session_state.temp_visitor_id,
-            max_age=31536000,  # 1 rok, v sekundách
-        )
-    except Exception as exc:
-        print(f"[COOKIE] CookieController.set() selhalo ({exc}) -- ID bude platit jen pro tuhle session.")
-    return st.session_state.temp_visitor_id
+    vid = st.query_params.get(_VISITOR_ID_PARAM)
+    if vid:
+        return vid
+    new_id = str(uuid.uuid4())
+    st.query_params[_VISITOR_ID_PARAM] = new_id
+    return new_id
 
 
 def _client_key() -> str:
