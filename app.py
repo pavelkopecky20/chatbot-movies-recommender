@@ -17,7 +17,7 @@ from openai import OpenAI
 import brain
 from embedding_classifier import ConstraintClassifier
 
-st.set_page_config(page_title="Movie Chatbot", page_icon="🎬")
+st.set_page_config(page_title="Movie Chatbot", page_icon="🎬", initial_sidebar_state="expanded")
 
 
 def _set_element_background(selector: str, image_path: Path, mime: str = "image/jpeg") -> None:
