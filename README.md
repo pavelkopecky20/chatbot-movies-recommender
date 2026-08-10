@@ -11,25 +11,30 @@ pinned: false
 
 # Movie Chatbot
 
-Konverzační doporučovací chatbot nad katalogem filmů (1331 titulů z TMDB). Portfolio ukázka RAG/agentního
-pipeline pro streamovací katalog.
+Conversational movie recommendation chatbot over a TMDB catalog (1331 titles). Portfolio demo of a
+RAG/agentic pipeline over a streaming catalog.
 
-## Co to umí
+## What it does
 
-- **Hybrid retrieval** (`brain.py`, `VectorStore`) -- tvrdý filtr podle žánru/země původu, pak similarity
-  ranking nad embeddingy (`text-embedding-3-small`).
-- **Sticky constraints** -- omezení jako žánr nebo země původu se pamatují napříč tahy konverzace, dokud
-  je uživatel explicitně nezruší. Extrahují se dvěma způsoby: rychlá keyword pravidla a sémantická
-  klasifikace nad embeddingy (`embedding_classifier.py`, `ConstraintClassifier` -- centroidy referenčních
-  frází per kategorie).
-- **LLM routing** -- jednoduché tahy (krátká změna omezení) jdou na `gpt-4o-mini`, složitější na `gpt-4o`.
-- **Structured output** -- odpověď LLM je vynucená přes pydantic schéma (`AgentResponse`), ne parsovaná
-  z volného textu.
-- **Guardrails** -- LLM smí doporučit jen tituly z retrievalem nalezených kandidátů; výstup se ještě
-  validuje proti reálným katalogovým ID před vrácením uživateli.
+- **Hybrid retrieval** (`brain.py`, `VectorStore`) -- hard filter by genre/origin country, then similarity
+  ranking over embeddings (`text-embedding-3-small`).
+- **Sticky constraints** -- constraints like genre or origin country are remembered across conversation
+  turns until the user explicitly clears them. Extracted two ways: fast keyword rules and semantic
+  classification over embeddings (`embedding_classifier.py`, `ConstraintClassifier` -- centroids of
+  reference phrases per category).
+- **LLM routing** -- simple turns (short constraint change) go to `gpt-4o-mini`, more complex ones to
+  `gpt-4o`.
+- **Structured output** -- the LLM response is enforced via a pydantic schema (`AgentResponse`), not
+  parsed from free text.
+- **Guardrails** -- the LLM may only recommend titles from the retrieval candidates; the output is
+  validated against real catalog IDs before being returned to the user.
 
-## Poznámka k tomuhle nasazení
+## Note on this deployment
 
-Tohle je veřejná, ale nepropagovaná demo instance -- počet zpráv na návštěvníka je omezený (viz postranní
-panel), aby nedošlo k vyčerpání API kreditu. Data o filmech pocházejí z [TMDB](https://www.themoviedb.org/)
-(`fetch_tmdb_catalog.py` -- jednorázový skript, který katalog stáhl, není součástí běžícího dema).
+This is a public but unlisted demo instance -- the number of messages per visitor is capped (see the
+sidebar) to avoid exhausting API credit. Movie data comes from [TMDB](https://www.themoviedb.org/)
+(`fetch_tmdb_catalog.py` -- a one-off script that downloaded the catalog, not part of the running demo).
+
+Note: the chatbot itself converses in Czech (it targets a Czech-language movie catalog and audience) --
+type your queries in Czech, e.g. "chci horor" (I want a horror movie) or "film, kde hraje Tom Hanks"
+(a movie starring Tom Hanks).
