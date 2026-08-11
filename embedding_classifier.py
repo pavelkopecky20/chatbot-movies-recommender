@@ -1,10 +1,10 @@
 """
-Kompletní implementace embedding klasifikace pro extrakci sticky constraints.
-Náhrada/doplněk za čistý keyword matching z hlavního prototypu.
+Embedding-based classifier for sticky-constraint extraction -- an alternative/complement
+to plain keyword matching.
 
-Funguje ve dvou režimech:
-- Se skutečným OPENAI_API_KEY: použije text-embedding-3-small (multilingual)
-- Bez klíče: fallback (jen pro spustitelnost, NENÍ sémanticky funkční -- viz demo níže)
+Two modes:
+- With a real OPENAI_API_KEY: uses text-embedding-3-small (multilingual)
+- Without a key: falls back to a random vector (keeps the demo runnable, NOT semantically functional)
 """
 
 import os
@@ -18,10 +18,6 @@ except ImportError:
     _openai_available = False
 
 
-# ---------------------------------------------------------------------------
-# 1. Embedding provider (stejný princip jako v hlavním prototypu)
-# ---------------------------------------------------------------------------
-
 class EmbeddingProvider:
     def __init__(self, client: Optional["OpenAI"]):
         self.client = client
@@ -34,7 +30,6 @@ class EmbeddingProvider:
             )
             return np.array([d.embedding for d in response.data])
 
-        # Fallback -- jen pro spustitelnost bez API klíče, NENÍ sémanticky funkční
         vectors = []
         for text in texts:
             rng = np.random.default_rng(abs(hash(text)) % (2**32))
@@ -46,11 +41,8 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
-# ---------------------------------------------------------------------------
-# 2. Definice referenčních frází pro každou dimenzi constraintu
-#    -- tohle je ta "few-shot" sada, kterou bys ladil na reálných datech
-# ---------------------------------------------------------------------------
-
+# Reference phrases per category, per constraint dimension -- the "few-shot" set you'd
+# tune against real usage data.
 ORIGIN_REFERENCE = {
     "local": [
         "chci lokální obsah",
@@ -110,32 +102,28 @@ SORT_REFERENCE = {
 
 CAST_REFERENCE = {}
 
-# ---------------------------------------------------------------------------
-# 3. Klasifikátor -- centroidy se počítají JEDNOU při inicializaci (ne za běhu)
-# ---------------------------------------------------------------------------
 
 class ConstraintClassifier:
     """
-    Pro každou dimenzi (origin, genre, sort_by) drží centroid každé kategorie.
-    Centroid = průměrný embedding všech referenčních frází dané kategorie.
+    Holds a centroid per category per dimension (origin, genre, sort_by). A centroid
+    is the average embedding of that category's reference phrases, computed once at
+    init, not per call.
     """
 
     def __init__(self, embedder: EmbeddingProvider, threshold: float = 0.6):
         self.embedder = embedder
         self.threshold = threshold
 
-        # Předpočítá centroidy pro každou dimenzi -- děje se jen JEDNOU při startu
         self.origin_centroids = self._build_centroids(ORIGIN_REFERENCE)
         self.genre_centroids = self._build_centroids(GENRE_REFERENCE)
         self.sort_centroids = self._build_centroids(SORT_REFERENCE)
+        self.cast_centroids = self._build_centroids(CAST_REFERENCE)
 
-        self.cast_centroids = self._build_centroids(CAST_REFERENCE)  # Přidáno pro detekci herců
-        
     def _build_centroids(self, reference: dict[str, list[str]]) -> dict[str, np.ndarray]:
         centroids = {}
         for label, phrases in reference.items():
-            vecs = self.embedder.embed(phrases)       # zaembeduje všechny fráze kategorie
-            centroids[label] = vecs.mean(axis=0)       # zprůměruje je do jednoho bodu
+            vecs = self.embedder.embed(phrases)
+            centroids[label] = vecs.mean(axis=0)
         return centroids
 
     def _classify(self, msg_vec: np.ndarray, centroids: dict[str, np.ndarray]) -> tuple[Optional[str], float]:
@@ -145,15 +133,12 @@ class ConstraintClassifier:
             if score > best_score:
                 best_label, best_score = label, score
         if best_score < self.threshold:
-            return None, best_score               # "nejsem si dost jistý" -- vrátí None
+            return None, best_score
         return best_label, best_score
 
     def classify_message(self, user_message: str) -> dict:
-        """
-        Vrátí slovník s výsledky klasifikace napříč VŠEMI dimenzemi najednou.
-        Runtime cena: JEDNO embedding volání na zprávu (ne jedno na dimenzi).
-        """
-        msg_vec = self.embedder.embed([user_message])[0]   # jediné volání za běhu
+        """Classifies across all dimensions at once -- one embedding call per message, not one per dimension."""
+        msg_vec = self.embedder.embed([user_message])[0]
 
         origin_label, origin_score = self._classify(msg_vec, self.origin_centroids)
         genre_label, genre_score = self._classify(msg_vec, self.genre_centroids)
@@ -171,13 +156,8 @@ class ConstraintClassifier:
             "origin_score": origin_score,
             "genre_score": genre_score,
             "sort_score": sort_score,
-            
         }
 
-
-# ---------------------------------------------------------------------------
-# 4. Demo
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -192,10 +172,10 @@ if __name__ == "__main__":
     classifier = ConstraintClassifier(embedder, threshold=0.75)
 
     test_messages = [
-        "chci jen tuzemskou tvorbu",              # mělo by dát origin=local
-        "něco jako ten starý film s agentem",      # mělo by dát genre=spy
-        "chci něco aktuálního, co teď vyšlo",       # mělo by dát sort_by=year_desc
-        "nechci nic ze zahraničí",                  # mělo by dát origin=local (přes zápor)
+        "chci jen tuzemskou tvorbu",
+        "něco jako ten starý film s agentem",
+        "chci něco aktuálního, co teď vyšlo",
+        "nechci nic ze zahraničí",
     ]
 
     for msg in test_messages:

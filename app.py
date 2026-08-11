@@ -21,7 +21,6 @@ st.set_page_config(page_title="Movie Chatbot", page_icon="🎬", layout="wide", 
 
 
 def _set_element_background(selector: str, image_path: Path, mime: str = "image/jpeg") -> None:
-    """Sets a background image on any element matched by a CSS selector (sidebar, main area, ...)."""
     encoded = base64.b64encode(image_path.read_bytes()).decode()
     st.markdown(
         f"""
@@ -39,22 +38,20 @@ def _set_element_background(selector: str, image_path: Path, mime: str = "image/
     )
 
 
-_PICTURES_DIR = Path(__file__).parent / "pictures"  # path relative to app.py -- works no matter where streamlit is launched from
+_PICTURES_DIR = Path(__file__).parent / "pictures"
 _set_element_background('[data-testid="stSidebar"]', _PICTURES_DIR / "movies.jpg")
 st.markdown(
     '<style>[data-testid="stAppScrollToBottomContainer"] { background-color: #000000 !important; }</style>',
     unsafe_allow_html=True,
-)  # plain black instead of an image on the main panel (was popcorn_girls.jpg)
-# stHeader (top toolbar with "Deploy") and stBottom (bottom bar with chat_input) are SEPARATE elements,
-# not descendants of stAppScrollToBottomContainer above -- so the image from there didn't reach them, they need their own.
-_set_element_background('[data-testid="stHeader"]', _PICTURES_DIR / "movies.jpg", mime="image/jpg")  # solid white by default with a high z-index; an opaque image overrides it because it paints on top of the color layer
+)
+# stHeader and stBottom are separate elements, not descendants of stAppScrollToBottomContainer
+# above -- a background set on one doesn't reach them, they need their own.
+_set_element_background('[data-testid="stHeader"]', _PICTURES_DIR / "movies.jpg", mime="image/jpg")  # opaque image overrides the default solid-white header because it paints on top of the color layer
 _set_element_background('[data-testid="stBottom"]', _PICTURES_DIR / "popcorn.jpg", mime="image/jpg")
 
 st.markdown(
     """
     <style>
-    /* Sidebar has a background image -- text in it needs its own readable backdrop, not directly on the image.
-       stSidebarUserContent = exactly the content the app itself puts in the sidebar (not nav/logo etc.). */
     [data-testid="stSidebarUserContent"] {
         background-color: rgba(0, 0, 0, 0.88) !important;
         border-radius: 10px;
@@ -63,8 +60,8 @@ st.markdown(
     [data-testid="stSidebarUserContent"] * {
         color: white !important;
     }
-    /* Buttons handled separately -- the built-in white/light button background plus white text above
-       would give white-on-white, unreadable. Transparent background + white border, no solid fill. */
+    /* transparent + white border, not a solid fill -- the built-in button background is light,
+       which combined with white text above would be white-on-white */
     [data-testid="stSidebarUserContent"] button {
         background-color: transparent !important;
         border: 2px solid white !important;
@@ -86,11 +83,6 @@ st.markdown(
 st.markdown(
     """
     <style>
-    /* The main window has a VISIBLE background image (set on stAppScrollToBottomContainer
-       above, not on this container -- that one is just a narrower, padded inner box, see the
-       comment above). This section only handles TEXT readability: generally white text + a
-       shadow (readable even directly on the image), and only INDIVIDUAL elements (title, chat
-       bubbles, movie cards) get their own dark backdrop. */
     [data-testid="stMainBlockContainer"] * {
         color: white !important;
         text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.9);
@@ -105,16 +97,14 @@ st.markdown(
         background-color: rgba(255, 255, 255, 0.15) !important;
         border-color: white !important;
     }
-    /* Title + caption at the top -- its own dark panel (see st.container(key="header_banner") in the code).
-       Streamlit renders this container as a flex item with flex-basis: 0% / flex-grow: 1, so
-       resizing IT directly (width, or even flex-basis) to break out of stMainBlockContainer's own
+    /* Streamlit renders this container as a flex item with flex-basis: 0% / flex-grow: 1, so
+       resizing it directly (width, flex-basis) to break out of stMainBlockContainer's own
        padding (80px sides / 96px top at desktop width) kept getting re-collapsed by that flex
-       sizing. The background itself lives on an absolutely-positioned ::before, offset from the
-       container's own box -- absolute left/right/top offsets aren't subject to the parent's flex
-       algorithm at all, so this reaches the true edges of the main panel regardless of it.
-       (Tried forcing stMainBlockContainer to min-height: 100% + flex-grow: 1 down the ancestor
-       chain to fill height without a fixed number -- reverted, it pushed the scrollable chat
-       history/input area out of place. Back to a plain padded box for height instead.) */
+       sizing -- the background lives on an absolutely-positioned ::before instead, offset from
+       the container's own box, since absolute left/right/top offsets aren't subject to the
+       parent's flex algorithm. (min-height: 100% + flex-grow down the ancestor chain was tried
+       for the same reason without a fixed number, but it pushed the scrollable chat
+       history/input area out of place -- reverted.) */
     .st-key-header_banner {
         position: relative;
         border-radius: 10px;
@@ -133,20 +123,16 @@ st.markdown(
         border-radius: 10px;
         z-index: -1;
     }
-    /* Chat bubbles -- their own strong dark backdrop, this is where most of the text gets read. */
     [data-testid="stChatMessage"] {
         background-color: rgba(0, 0, 0, 0.6) !important;
         border-radius: 10px;
     }
-    /* Recommended-movie cards -- st.container(border=True, key=f"card-...") in the code, targeted via partial class match. */
     [class*="st-key-card-"] {
         background-color: rgba(0, 0, 0, 0.6) !important;
         border-radius: 10px;
     }
-    /* Chat input -- stChatInput/stBottom are themselves transparent (the image underneath shows through),
-       but the input field's inner box has its own built-in light-gray background (rgb(240,242,246)),
-       with no data-testid of its own -- targeted structurally (first child of stChatInput), not via an
-       unstable generated CSS class. */
+    /* first child of stChatInput has no data-testid of its own -- targeted structurally
+       instead of via an unstable generated CSS class */
     [data-testid="stChatInput"] > div:first-child {
         background-color: rgba(0, 0, 0, 0.6) !important;
     }
@@ -156,9 +142,8 @@ st.markdown(
     [data-testid="stChatInput"] textarea::placeholder {
         color: rgba(255, 255, 255, 0.6) !important;
     }
-    /* The area AROUND the input field (bottom bar) -- Streamlit internally renders its own
-       opaque white panel there (no data-testid, just a generated class "e15ve43o3") that sits
-       ON TOP of stBottom and hides its image. Doesn't touch the input field itself. */
+    /* Streamlit renders its own opaque panel around the input field (no data-testid, just a
+       generated class) that otherwise sits on top of stBottom and hides its background. */
     .e15ve43o3 {
         background-color: transparent !important;
     }
@@ -167,20 +152,19 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-FREE_QUOTA = 3      # free messages per visitor -- see the OpenAI spend cap as a second layer of protection
-EXTENDED_QUOTA = 50  # limit for visitors with a valid access code (see _try_unlock)
+FREE_QUOTA = 3
+EXTENDED_QUOTA = 50
 
 # The quota is deliberately OUTSIDE st.session_state -- that resets on a plain page refresh
 # (new WebSocket session = new session_state), so it would be a trivial bypass. Instead it's
-# process-level shared state, keyed by _client_key() (see below -- an ID in the URL query
-# parameter, not a cookie/IP/header -- those turned out to be unreliable in practice, see
-# the comment on _get_or_create_visitor_id). Survives a refresh, but not a Space
-# restart/redeploy (an acceptable tradeoff for a demo; the backstop is the OpenAI spend cap).
+# process-level shared state, keyed by _client_key() (an ID in the URL query parameter, not a
+# cookie/IP/header -- those turned out unreliable in practice, see _get_or_create_visitor_id).
+# Survives a refresh, but not a redeploy (acceptable for a demo; the backstop is the OpenAI
+# spend cap).
 #
-# IMPORTANT: a plain module-level `dict = {}` would NOT work -- Streamlit re-executes the
-# whole top-level script code on EVERY rerun (even an implicit one after st.rerun()), so it
-# would reset on every message. @st.cache_resource is the only way to have an object that
-# actually survives reruns and is shared across sessions.
+# A plain module-level dict would NOT work -- Streamlit re-executes the whole top-level script
+# on every rerun, so it would reset on every message. @st.cache_resource is what actually
+# survives reruns and is shared across sessions.
 _quota_lock = threading.Lock()
 
 
@@ -191,22 +175,19 @@ def _get_quota_store() -> dict[str, int]:
 
 _VISITOR_ID_PARAM = "vid"
 
-# History of failed attempts (to make it clear why this and not something "smarter"):
+# History of failed attempts, for why this and not something "smarter":
 # 1) IP/X-Forwarded-For headers -- unreliable across refreshes of the same visitor on
 #    Streamlit Community Cloud.
 # 2) Manual JS injection via st.iframe/document.cookie -- modern browsers partition cookies
-#    set INSIDE an iframe from the main page's cookies, so they never reached the server on
-#    the next request.
-# 3) streamlit-cookies-controller (a real async component) -- in production it crashed with
-#    a TypeError due to the library's internal state (self.__cookies == None), and even after
-#    wrapping it in try/except the ID still changed on every refresh -- systematically
-#    unreliable on this deployment, not just an occasional glitch.
+#    set INSIDE an iframe from the main page's cookies, so they never reached the server.
+# 3) streamlit-cookies-controller (a real async component) -- crashed in production with a
+#    TypeError from the library's internal state, and even after wrapping it in try/except the
+#    ID still changed on every refresh -- systematically unreliable on this deployment.
 #
-# st.query_params is a purely native Streamlit mechanism -- no async component, no round
-# trip, no dependency on how the browser/platform handles cookies. The ID is written
-# directly into the URL; a refresh (F5) loads the SAME URL including the parameter, so the
-# app sees it right at the start of the script run, synchronously and reliably. Cost: the ID
-# is visible in the address bar (just a random UUID, nothing sensitive).
+# st.query_params is purely native -- no async component, no dependency on how the
+# browser/platform handles cookies. The ID is written into the URL, so a refresh loads the
+# same URL including the parameter and the app sees it synchronously at script start. Cost:
+# the ID is visible in the address bar (just a random UUID, nothing sensitive).
 def _get_or_create_visitor_id() -> str:
     vid = st.query_params.get(_VISITOR_ID_PARAM)
     if vid:
@@ -231,9 +212,7 @@ def _increment_messages_used() -> None:
         quota_store[key] = quota_store.get(key, 0) + 1
 
 
-# Same principle as the quota above -- @st.cache_resource, not a plain module-level set,
-# otherwise the unlock would be lost on every rerun (see the comment above on the quota).
-@st.cache_resource
+@st.cache_resource  # same reasoning as the quota store above -- must survive reruns
 def _get_unlocked_store() -> set[str]:
     return set()
 
@@ -243,7 +222,7 @@ def _valid_access_codes() -> set[str]:
     try:
         return set(st.secrets.get("access_codes", {}).values())
     except Exception:
-        return set()  # local run without secrets.toml -- no codes are valid, doesn't crash the app
+        return set()
 
 
 def _is_unlocked() -> bool:
@@ -261,9 +240,9 @@ def _effective_quota() -> int:
     return EXTENDED_QUOTA if _is_unlocked() else FREE_QUOTA
 
 
-@st.cache_resource(show_spinner="Preparing catalog and embeddings...")
+@st.cache_resource(show_spinner="Připravuji katalog a embeddingy...")
 def get_resources():
-    """Builds expensive shared resources ONCE for the process lifetime (across all visitors)."""
+    """Builds expensive shared resources once for the process lifetime, across all visitors."""
     api_key = os.environ.get("OPENAI_API_KEY")
     client = OpenAI(api_key=api_key) if (brain._openai_available and api_key) else None
     embedder = brain.EmbeddingProvider(client)
@@ -278,7 +257,7 @@ client, store, classifier, catalog_by_id = get_resources()
 if "conv_state" not in st.session_state:
     st.session_state.conv_state = brain.ConversationState(classifier=classifier)
 if "display_log" not in st.session_state:
-    st.session_state.display_log = []  # [{"role", "content", "picks", "chips"}, ...] -- richer than conv_state.history
+    st.session_state.display_log = []  # richer than conv_state.history -- also carries picks/chips for rendering
 if "pending_chip" not in st.session_state:
     st.session_state.pending_chip = None
 
@@ -289,7 +268,7 @@ def process_message(user_message: str) -> None:
     )
 
     quota = _effective_quota()
-    if _messages_used() >= quota:                                # quota exhausted -- NO OpenAI call
+    if _messages_used() >= quota:
         response = brain.AgentResponse(
             reply=(
                 f"Vyčerpal jsi limit {quota} zpráv pro tuhle ukázku. "
@@ -310,14 +289,13 @@ def process_message(user_message: str) -> None:
 
 def _handle_chip_command(chip_text: str) -> bool:
     """
-    CHIP_RESET_ALL / CHIP_RESET_GENRE are DIRECT COMMANDS -- handled right here, not by
-    sending them through process_message()/handle_turn(). The earlier approach (send the
-    chip's text as a regular message and rely on keyword matching in update_constraints to
-    recognize it) wasn't reliable -- "Zrušit omezení" (infinitive) never matched the check for
-    "zruš omezení" (imperative) in brain.py. A direct command also skips the OpenAI call and
-    doesn't count against the quota -- it's a pure UI action, not a conversation turn.
-    Returns True if chip_text was recognized as a command (and handled), False otherwise --
-    the caller then sends the text the normal way via process_message().
+    CHIP_RESET_ALL / CHIP_RESET_GENRE are direct commands, handled right here instead of
+    going through process_message()/handle_turn(). Sending the chip text as a regular message
+    and relying on keyword matching wasn't reliable -- "Zrušit omezení" (infinitive) never
+    matched the check for "zruš omezení" (imperative) in brain.py. A direct command also skips
+    the OpenAI call and doesn't count against the quota -- it's a UI action, not a turn.
+    Returns True if chip_text was a recognized command (and handled); the caller then sends
+    unrecognized text the normal way via process_message().
     """
     if chip_text == brain.CHIP_RESET_ALL:
         st.session_state.conv_state.sticky_constraints.clear()
@@ -343,8 +321,7 @@ with st.sidebar:
         st.caption("Žádné aktivní omezení.")
 
     # Persistent buttons, not just chips tied to a specific response -- those only appear on
-    # the FALLBACK_RESPONSE / "nothing found" branch in call_llm(), so they'd disappear on a
-    # normal (successful) response. They call the SAME _handle_chip_command() function as chips.
+    # the "nothing found" branch in call_llm(), so they'd disappear on a normal response.
     col_genre, col_all = st.columns(2)
     with col_genre:
         if st.button(brain.CHIP_RESET_GENRE, use_container_width=True):
@@ -371,7 +348,7 @@ with st.sidebar:
     st.caption(f"Zbývá {remaining}/{quota} zpráv pro tohle připojení.")
 
     if st.button("Resetovat konverzaci"):
-        st.session_state.conv_state.sticky_constraints.clear()  # the quota lives outside session_state, this doesn't touch it
+        st.session_state.conv_state.sticky_constraints.clear()  # quota lives outside session_state, unaffected by this
         st.session_state.conv_state.history.clear()
         st.session_state.display_log = []
         st.rerun()
@@ -379,34 +356,40 @@ with st.sidebar:
     if client is None:
         st.warning("Běží ve fallback režimu (chybí OPENAI_API_KEY) -- odpovědi nejsou generované LLM.")
 
-with st.container(key="header_banner"):  # semi-transparent dark panel behind the title -- text color/shadow alone
-    st.title("🎬 Movie Chatbot")           # wasn't enough against an unpredictable background image, this is reliable regardless of what's underneath
+with st.container(key="header_banner"):
+    st.title("🎬 Movie Chatbot")
     st.caption(
-        f"Doporučovací chatbot nad katalogem filmů (TMDB, {len(brain.CATALOG)} titulů) -- embedding retrieval, "
-        "sticky constraints extrahované klasifikátorem nad embeddingy, LLM routing mezi gpt-4o/gpt-4o-mini."
+        f"Doporučovací chatbot nad katalogem filmů (TMDB, {len(brain.CATALOG)} titulů). "
+        "- Hybrid retrieval (tvrdý filtr → cosine similarity) "
+        "- Sticky constraints extrahované klasifikátorem nad embeddingy "
+        "- LLM routing mezi gpt-4o/gpt-4o-mini "
+        "- Explicitní obrana proti prompt injection "
+        "- Chatbot pracuje s češtinou jako primárním jazykem "
+        "- Token-aware batchování přes tiktoken "
+        "- nad konečným výstupem bdí Guardrails "
     )
 
-if st.session_state.pending_chip:                              # chip click
+if st.session_state.pending_chip:
     chip_text = st.session_state.pending_chip
     st.session_state.pending_chip = None
-    if not _handle_chip_command(chip_text):                    # first try it as a direct command (reset/genre)
-        process_message(chip_text)                              # otherwise send it as a regular message, as if the user typed it
+    if not _handle_chip_command(chip_text):
+        process_message(chip_text)
     st.rerun()
 
 for i, turn in enumerate(st.session_state.display_log):
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
 
-        for pick_id in turn["picks"]:                           # recommended-title cards
+        for pick_id in turn["picks"]:
             item = catalog_by_id.get(pick_id)
             if item is None:
                 continue
-            with st.container(border=True, key=f"card-{i}-{pick_id}"):  # key -> targetable CSS class st-key-card-... for a readable backdrop
+            with st.container(border=True, key=f"card-{i}-{pick_id}"):  # key -> targetable CSS class st-key-card-...
                 st.markdown(f"**{item.title}** ({item.year}) -- _{item.genre}_")
                 description = item.description
                 st.caption(description[:200] + ("..." if len(description) > 200 else ""))
 
-        if turn["chips"]:                                       # quick replies as buttons
+        if turn["chips"]:
             cols = st.columns(len(turn["chips"]))
             for col, chip in zip(cols, turn["chips"]):
                 with col:
